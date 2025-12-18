@@ -4,23 +4,7 @@ import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
 import Papa from 'papaparse';
-
-interface StrategyRequest {
-    pool_id?: string;
-    factor_ids?: number[] | null;
-    train_start?: string;
-    train_end?: string;
-    test_start?: string;
-    test_end?: string;
-    target_horizons?: number[];
-    strategy?: {
-        type?: string;
-        top_pct?: number;
-        rebalance_days?: number;
-    };
-    factor_signals?: number[][];  // Optional pre-computed signals
-    factor_signal_path?: string;
-}
+import { computeStrategyFallback, type StrategyRequest } from '@/lib/strategy-ts';
 
 interface PythonRunResult {
     data?: unknown;
@@ -262,6 +246,13 @@ function hasMetricsAndReturns(data: unknown): data is { metrics: unknown[]; dail
     return Array.isArray(payload.metrics) && Array.isArray(payload.daily_returns);
 }
 
+function addEngine(data: unknown, engine: string): Record<string, unknown> {
+    if (data && typeof data === 'object') {
+        return { ...(data as Record<string, unknown>), engine };
+    }
+    return { data, engine };
+}
+
 async function ensureSignalFile(request: StrategyRequest): Promise<{ signalPath?: string; computeData?: unknown }> {
     if (!request.pool_id) return {};
 
@@ -337,7 +328,7 @@ export async function POST(request: NextRequest) {
             try {
                 const ensured = await ensureSignalFile(payload);
                 if (ensured && 'computeData' in ensured && ensured.computeData) {
-                    return NextResponse.json(ensured.computeData);
+                    return NextResponse.json(addEngine(ensured.computeData, 'python'));
                 }
                 signalPath = ensured?.signalPath;
                 if (signalPath) {
@@ -365,9 +356,42 @@ export async function POST(request: NextRequest) {
 
         console.log(`[Strategy API] Running lightweight computation${signalPath ? ` with cached signal ${path.basename(signalPath)}` : ''}`);
 
+        const preferTs = process.env.VERCEL === '1' || process.env.STRATEGY_TS_ONLY === '1';
+        const runTsFallback = async (reason?: string) => {
+            if (reason) {
+                console.warn(`[Strategy API] Falling back to TS strategy engine: ${reason}`);
+            } else {
+                console.warn('[Strategy API] Falling back to TS strategy engine');
+            }
+            const tsResult = await computeStrategyFallback(payload);
+            return NextResponse.json(addEngine(tsResult, 'ts'));
+        };
+
+        if (preferTs) {
+            return await runTsFallback('TS fallback forced');
+        }
+
         const result = await runPythonScript(STRATEGY_SCRIPT, payload, STRATEGY_TIMEOUT_MS, '[Strategy]');
 
         if (result.error || !result.data) {
+            const errorText = `${result.error ?? ''} ${result.details ?? ''}`.toLowerCase();
+            const isSpawnFailure = errorText.includes('failed to spawn')
+                || errorText.includes('enoent')
+                || errorText.includes('no such file or directory')
+                || errorText.includes('not found');
+            if (isSpawnFailure) {
+                try {
+                    return await runTsFallback(result.error);
+                } catch (err: unknown) {
+                    const details = err instanceof Error ? err.message : undefined;
+                    return NextResponse.json({
+                        error: 'Strategy computation failed in TS fallback',
+                        details,
+                        metrics: [],
+                        daily_returns: []
+                    }, { status: 500 });
+                }
+            }
             return NextResponse.json({
                 error: result.error || 'Strategy computation failed',
                 details: result.details,
@@ -376,7 +400,7 @@ export async function POST(request: NextRequest) {
             }, { status: 500 });
         }
 
-        return NextResponse.json(result.data);
+        return NextResponse.json(addEngine(result.data, 'python'));
 
     } catch (e: unknown) {
         const message = e instanceof Error ? e.message : 'Internal error';

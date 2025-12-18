@@ -15,7 +15,6 @@ interface PythonRunResult {
 const PYTHON_CMD = resolvePythonCommand();
 const STRATEGY_SCRIPT = resolveScriptPath('python-backend/strategy_service.py');
 const COMPUTE_SCRIPT = resolveScriptPath('python-backend/compute_service.py');
-const SIGNAL_CACHE_DIR = resolveSignalDir();
 const SIGNAL_EXTENSION = '.npz';
 const STRATEGY_TIMEOUT_MS = 60000;
 const COMPUTE_TIMEOUT_MS = 180000;
@@ -42,11 +41,26 @@ function resolveScriptPath(relative: string): string {
     return candidates[candidates.length - 1];
 }
 
-function resolveSignalDir(): string {
-    const candidates = [
-        path.resolve(process.cwd(), 'tmp/strategy_signals'),
-        path.resolve(process.cwd(), '../tmp/strategy_signals'),
-    ];
+function getSignalSearchDirs(): string[] {
+    const dirs: string[] = [];
+    if (process.env.STRATEGY_SIGNAL_DIR) {
+        dirs.push(path.resolve(process.env.STRATEGY_SIGNAL_DIR));
+    }
+    dirs.push(path.resolve(process.cwd(), 'tmp/strategy_signals'));
+    dirs.push(path.resolve(process.cwd(), '../tmp/strategy_signals'));
+    dirs.push(path.resolve(process.cwd(), 'public', 'data', 'strategy_signals'));
+    dirs.push(path.join('/tmp', 'strategy_signals'));
+    return dirs;
+}
+
+function getWritableSignalDir(): string {
+    const candidates: string[] = [];
+    if (process.env.STRATEGY_SIGNAL_DIR) {
+        candidates.push(path.resolve(process.env.STRATEGY_SIGNAL_DIR));
+    }
+    candidates.push(path.resolve(process.cwd(), 'tmp/strategy_signals'));
+    candidates.push(path.resolve(process.cwd(), '../tmp/strategy_signals'));
+    candidates.push(path.join('/tmp', 'strategy_signals'));
     for (const dir of candidates) {
         try {
             fs.mkdirSync(dir, { recursive: true });
@@ -56,6 +70,16 @@ function resolveSignalDir(): string {
         }
     }
     throw new Error('Unable to initialize signal cache directory');
+}
+
+function findExistingSignalPath(key: string): string | undefined {
+    for (const dir of getSignalSearchDirs()) {
+        const candidate = path.join(dir, `${key}${SIGNAL_EXTENSION}`);
+        if (fs.existsSync(candidate)) {
+            return candidate;
+        }
+    }
+    return undefined;
 }
 
 function runPythonScript(scriptPath: string, payload: unknown, timeoutMs: number, label: string): Promise<PythonRunResult> {
@@ -208,7 +232,7 @@ function buildCustomPoolFile(request: StrategyRequest): string | null {
     if (!needsCustom) return null;
 
     const key = buildSignalKey(request);
-    const poolPath = path.join(SIGNAL_CACHE_DIR, `${key}.pool.json`);
+    const poolPath = path.join(getWritableSignalDir(), `${key}.pool.json`);
     if (!fs.existsSync(poolPath)) {
         fs.writeFileSync(poolPath, JSON.stringify({ exprs }, null, 2));
     }
@@ -253,12 +277,24 @@ function addEngine(data: unknown, engine: string): Record<string, unknown> {
     return { data, engine };
 }
 
-async function ensureSignalFile(request: StrategyRequest): Promise<{ signalPath?: string; computeData?: unknown }> {
+async function ensureSignalFile(
+    request: StrategyRequest,
+    options: { allowCompute?: boolean } = {}
+): Promise<{ signalPath?: string; computeData?: unknown }> {
     if (!request.pool_id) return {};
 
     const key = buildSignalKey(request);
-    const signalPath = path.join(SIGNAL_CACHE_DIR, `${key}${SIGNAL_EXTENSION}`);
-    const legacyPath = path.join(SIGNAL_CACHE_DIR, `${key}.npy`);
+    const existingSignal = findExistingSignalPath(key);
+    if (existingSignal) {
+        return { signalPath: existingSignal };
+    }
+    if (options.allowCompute === false) {
+        throw new Error('Cached signal file missing; precompute signals and deploy them.');
+    }
+
+    const signalDir = getWritableSignalDir();
+    const signalPath = path.join(signalDir, `${key}${SIGNAL_EXTENSION}`);
+    const legacyPath = path.join(signalDir, `${key}.npy`);
 
     if (!fs.existsSync(signalPath) && fs.existsSync(legacyPath)) {
         try {
@@ -290,13 +326,13 @@ async function ensureSignalFile(request: StrategyRequest): Promise<{ signalPath?
             throw new Error(computeError);
         }
 
-        if (!fs.existsSync(signalPath)) {
-            if (hasMetricsAndReturns(computeResult.data)) {
-                console.warn('[Strategy API] Combined signal missing; returning compute_service output directly.');
-                return { computeData: computeResult.data };
-            }
-            throw new Error('Combined signal file missing after compute step');
+    if (!fs.existsSync(signalPath)) {
+        if (hasMetricsAndReturns(computeResult.data)) {
+            console.warn('[Strategy API] Combined signal missing; returning compute_service output directly.');
+            return { computeData: computeResult.data };
         }
+        throw new Error('Combined signal file missing after compute step');
+    }
     }
 
     return { signalPath };
@@ -306,27 +342,30 @@ export async function POST(request: NextRequest) {
     try {
         const body: StrategyRequest = await request.json();
         const payload: StrategyRequest = { ...body };
-        try {
-            const customPoolPath = buildCustomPoolFile(payload);
-            if (customPoolPath) {
-                payload.pool_id = customPoolPath;
-                payload.factor_ids = null;
+        const preferTs = process.env.VERCEL === '1' || process.env.STRATEGY_TS_ONLY === '1';
+        if (!preferTs) {
+            try {
+                const customPoolPath = buildCustomPoolFile(payload);
+                if (customPoolPath) {
+                    payload.pool_id = customPoolPath;
+                    payload.factor_ids = null;
+                }
+            } catch (err: unknown) {
+                const details = err instanceof Error ? err.message : undefined;
+                return NextResponse.json({
+                    error: 'Failed to resolve custom factor expressions',
+                    details,
+                    metrics: [],
+                    daily_returns: []
+                }, { status: 500 });
             }
-        } catch (err: unknown) {
-            const details = err instanceof Error ? err.message : undefined;
-            return NextResponse.json({
-                error: 'Failed to resolve custom factor expressions',
-                details,
-                metrics: [],
-                daily_returns: []
-            }, { status: 500 });
         }
 
         let signalPath: string | undefined;
 
-        if (payload.pool_id) {
+        if (payload.pool_id && !payload.factor_signal_path && !payload.factor_signals) {
             try {
-                const ensured = await ensureSignalFile(payload);
+                const ensured = await ensureSignalFile(payload, { allowCompute: !preferTs });
                 if (ensured && 'computeData' in ensured && ensured.computeData) {
                     return NextResponse.json(addEngine(ensured.computeData, 'python'));
                 }
@@ -344,6 +383,8 @@ export async function POST(request: NextRequest) {
                     daily_returns: []
                 }, { status: 500 });
             }
+        } else if (payload.factor_signal_path) {
+            signalPath = payload.factor_signal_path;
         }
 
         if (!payload.pool_id && !payload.factor_signals && !payload.factor_signal_path) {
@@ -356,7 +397,6 @@ export async function POST(request: NextRequest) {
 
         console.log(`[Strategy API] Running lightweight computation${signalPath ? ` with cached signal ${path.basename(signalPath)}` : ''}`);
 
-        const preferTs = process.env.VERCEL === '1' || process.env.STRATEGY_TS_ONLY === '1';
         const runTsFallback = async (reason?: string) => {
             if (reason) {
                 console.warn(`[Strategy API] Falling back to TS strategy engine: ${reason}`);

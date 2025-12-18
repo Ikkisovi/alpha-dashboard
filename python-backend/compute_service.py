@@ -263,6 +263,9 @@ def compute_metrics(request):
         test_end = request.get('test_end', '2024-12-31')
         target_horizons = request.get('target_horizons', [20])
 
+        # Skip heavy analytics for strategy-only mode (faster)
+        skip_analytics = request.get('skip_analytics', False)
+
         parse_warnings: list[str] = []
 
         # 3. Load Data
@@ -564,7 +567,14 @@ def compute_metrics(request):
                        })
 
         # --- EXTENDED ANALYTICS ---
-        
+        # Skip if skip_analytics=True (for faster strategy-only computation)
+
+        corr_matrix = []
+        vif_scores = []
+        rolling_ic_data = []
+        grid_search_results = []
+        factor_dictionary = []
+
         # Helper: Generate factor name
         def generate_factor_name(expr_str: str, idx: int) -> str:
             ops = re.findall(r'(Ts\w+|Rank|Log|Abs|Ret)', expr_str)
@@ -585,122 +595,118 @@ def compute_metrics(request):
             if any(t in expr_lower for t in ['rank', 'quantile']): return 'mean_reversion'
             return 'composite'
 
-        # 1. Correlation Matrix
-        # Flatten (T, N, F) -> (T*N, F)
-        T, N, F = factor_tensor.shape
-        flat = factor_tensor.reshape(-1, F)
-        valid_mask = ~torch.isnan(flat).any(dim=1)
-        flat_clean = flat[valid_mask]
-        corr_matrix = []
-        if flat_clean.shape[0] > 0:
-             corr = torch.corrcoef(flat_clean.T)
-             corr = torch.nan_to_num(corr, nan=0.0)
-             corr_matrix = corr.cpu().tolist()
+        if not skip_analytics:
+            # 1. Correlation Matrix
+            # Flatten (T, N, F) -> (T*N, F)
+            T, N, F = factor_tensor.shape
+            flat = factor_tensor.reshape(-1, F)
+            valid_mask = ~torch.isnan(flat).any(dim=1)
+            flat_clean = flat[valid_mask]
+            if flat_clean.shape[0] > 0:
+                 corr = torch.corrcoef(flat_clean.T)
+                 corr = torch.nan_to_num(corr, nan=0.0)
+                 corr_matrix = corr.cpu().tolist()
 
-        # 2. VIF Scores
-        vif_scores = []
-        try:
-            from statsmodels.stats.outliers_influence import variance_inflation_factor
-            flat_np = flat_clean.cpu().numpy()
-            # Subsample if too large
-            if len(flat_np) > 10000:
-                indices = np.random.choice(len(flat_np), 10000, replace=False)
-                flat_np = flat_np[indices]
-            
-            for i in range(F):
-                try:
-                    vif = variance_inflation_factor(flat_np, i)
-                    vif = min(vif, 1000.0)
-                except:
-                    vif = 0.0
-                vif_scores.append({
-                    "factor_id": selected_factor_ids[i] if i < len(selected_factor_ids) else i,
-                    "vif": float(vif),
-                    "multicollinear": vif > 10.0
-                })
-        except ImportError:
-            print("statsmodels not installed, skipping VIF", file=sys.stderr)
-            
-        # 3. Rolling IC (Test Period, Primary Horizon)
-        rolling_ic_data = []
-        primary_horizon = target_horizons[0]
-        targets_h = targets[primary_horizon]
-        if test_mask.any():
-            test_dates_list = [d.strftime('%Y-%m-%d') for d in dates[test_mask]]
-            for i in range(len(selected_exprs)):
-                # batch_pearsonr returns (T,)
-                daily_ic = batch_pearsonr(factor_tensor[test_mask, :, i], targets_h[test_mask, :])
-                for d_idx, ic_val in enumerate(daily_ic.cpu().numpy()):
-                    rolling_ic_data.append({
-                        "date": test_dates_list[d_idx],
-                        "factor_id": selected_factor_ids[i] if i < len(selected_factor_ids) else i,
-                        "ic": float(ic_val)
-                    })
-                    
-        # 4. Greedy Grid Search (Forward Selection)
-        grid_search_results = []
-        if test_mask.any():
-            max_factors = min(10, len(selected_exprs))
-            flat_test = factor_tensor[test_mask].reshape(-1, F)
-            flat_target = targets_h[test_mask].reshape(-1)
-            valid = ~(torch.isnan(flat_test).any(dim=1) | torch.isnan(flat_target))
-            X = flat_test[valid].cpu().numpy()
-            y = flat_target[valid].cpu().numpy()
-            
-            selected = []
-            remaining = list(range(F))
-            
-            for n in range(1, max_factors + 1):
-                best_r2 = -np.inf
-                best_idx = None
-                
-                for idx in remaining:
-                    trial = selected + [idx]
-                    X_trial = X[:, trial]
-                    # Add constant
-                    X_const = np.column_stack([np.ones(len(X_trial)), X_trial])
+            # 2. VIF Scores
+            try:
+                from statsmodels.stats.outliers_influence import variance_inflation_factor
+                flat_np = flat_clean.cpu().numpy()
+                # Subsample if too large
+                if len(flat_np) > 10000:
+                    indices = np.random.choice(len(flat_np), 10000, replace=False)
+                    flat_np = flat_np[indices]
+
+                for i in range(F):
                     try:
-                        coef, _, _, _ = np.linalg.lstsq(X_const, y, rcond=None)
-                        y_pred = X_const @ coef
-                        ss_res = np.sum((y - y_pred) ** 2)
-                        ss_tot = np.sum((y - y.mean()) ** 2)
-                        r2 = 1 - ss_res / ss_tot
+                        vif = variance_inflation_factor(flat_np, i)
+                        vif = min(vif, 1000.0)
                     except:
-                        r2 = 0.0
-                    
-                    if r2 > best_r2:
-                        best_r2 = r2
-                        best_idx = idx
-                
-                if best_idx is not None:
-                    selected.append(best_idx)
-                    remaining.remove(best_idx)
-                    real_ids = [selected_factor_ids[j] if j < len(selected_factor_ids) else j for j in selected]
-                    grid_search_results.append({
-                        "n_factors": n,
-                        "r_squared": float(best_r2),
-                        "selected_factors": real_ids
+                        vif = 0.0
+                    vif_scores.append({
+                        "factor_id": selected_factor_ids[i] if i < len(selected_factor_ids) else i,
+                        "vif": float(vif),
+                        "multicollinear": vif > 10.0
                     })
+            except ImportError:
+                print("statsmodels not installed, skipping VIF", file=sys.stderr)
 
-        # 5. Factor Dictionary
-        factor_dictionary = []
-        for i, (expr_str, _) in enumerate(selected_exprs):
-            fid = selected_factor_ids[i] if i < len(selected_factor_ids) else i
-            test_metrics = [m for m in metrics_results if m['factor_id'] == fid and m['period'] == 'test' and m['horizon_days'] == primary_horizon]
-            tm = test_metrics[0] if test_metrics else {}
-            
-            factor_dictionary.append({
-                "factor_id": fid,
-                "name": generate_factor_name(expr_str, fid),
-                "expression": expr_str,
-                "type": classify_factor_type(expr_str),
-                "description": "", # User requested empty description
-                "ic": tm.get('ic', 0),
-                "icir": tm.get('icir', 0),
-                "sharpe": tm.get('sharpe', 0),
-                "mdd": tm.get('max_drawdown', 0),
-                "source": os.path.basename(pool_file)
-            })
+            # 3. Rolling IC (Test Period, Primary Horizon)
+            primary_horizon = target_horizons[0]
+            targets_h = targets[primary_horizon]
+            if test_mask.any():
+                test_dates_list = [d.strftime('%Y-%m-%d') for d in dates[test_mask]]
+                for i in range(len(selected_exprs)):
+                    # batch_pearsonr returns (T,)
+                    daily_ic = batch_pearsonr(factor_tensor[test_mask, :, i], targets_h[test_mask, :])
+                    for d_idx, ic_val in enumerate(daily_ic.cpu().numpy()):
+                        rolling_ic_data.append({
+                            "date": test_dates_list[d_idx],
+                            "factor_id": selected_factor_ids[i] if i < len(selected_factor_ids) else i,
+                            "ic": float(ic_val)
+                        })
+
+            # 4. Greedy Grid Search (Forward Selection)
+            if test_mask.any():
+                max_factors = min(10, len(selected_exprs))
+                flat_test = factor_tensor[test_mask].reshape(-1, F)
+                flat_target = targets_h[test_mask].reshape(-1)
+                valid = ~(torch.isnan(flat_test).any(dim=1) | torch.isnan(flat_target))
+                X = flat_test[valid].cpu().numpy()
+                y = flat_target[valid].cpu().numpy()
+
+                selected = []
+                remaining = list(range(F))
+
+                for n in range(1, max_factors + 1):
+                    best_r2 = -np.inf
+                    best_idx = None
+
+                    for idx in remaining:
+                        trial = selected + [idx]
+                        X_trial = X[:, trial]
+                        # Add constant
+                        X_const = np.column_stack([np.ones(len(X_trial)), X_trial])
+                        try:
+                            coef, _, _, _ = np.linalg.lstsq(X_const, y, rcond=None)
+                            y_pred = X_const @ coef
+                            ss_res = np.sum((y - y_pred) ** 2)
+                            ss_tot = np.sum((y - y.mean()) ** 2)
+                            r2 = 1 - ss_res / ss_tot
+                        except:
+                            r2 = 0.0
+
+                        if r2 > best_r2:
+                            best_r2 = r2
+                            best_idx = idx
+
+                    if best_idx is not None:
+                        selected.append(best_idx)
+                        remaining.remove(best_idx)
+                        real_ids = [selected_factor_ids[j] if j < len(selected_factor_ids) else j for j in selected]
+                        grid_search_results.append({
+                            "n_factors": n,
+                            "r_squared": float(best_r2),
+                            "selected_factors": real_ids
+                        })
+
+            # 5. Factor Dictionary
+            for i, (expr_str, _) in enumerate(selected_exprs):
+                fid = selected_factor_ids[i] if i < len(selected_factor_ids) else i
+                test_metrics = [m for m in metrics_results if m['factor_id'] == fid and m['period'] == 'test' and m['horizon_days'] == primary_horizon]
+                tm = test_metrics[0] if test_metrics else {}
+
+                factor_dictionary.append({
+                    "factor_id": fid,
+                    "name": generate_factor_name(expr_str, fid),
+                    "expression": expr_str,
+                    "type": classify_factor_type(expr_str),
+                    "description": "", # User requested empty description
+                    "ic": tm.get('ic', 0),
+                    "icir": tm.get('icir', 0),
+                    "sharpe": tm.get('sharpe', 0),
+                    "mdd": tm.get('max_drawdown', 0),
+                    "source": os.path.basename(pool_file)
+                })
 
         return {
             "metrics": metrics_results,

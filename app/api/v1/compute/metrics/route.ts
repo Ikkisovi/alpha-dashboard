@@ -112,10 +112,10 @@ async function runPythonComputation(request: ComputeRequest): Promise<any> {
         child.stdin.write(JSON.stringify(request));
         child.stdin.end();
 
-        // Timeout (30 seconds for initial load, subsequent requests are faster due to caching)
+        // Timeout (60 seconds for initial load, subsequent requests are faster due to caching)
         setTimeout(() => {
             child.kill();
-            resolve({ error: "Computation timed out (30s limit)" });
-        }, 30000);
+            resolve({ error: "Computation timed out (60s limit)" });
+        }, 60000);
     });
 }

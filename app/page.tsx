@@ -231,32 +231,28 @@ export default function Dashboard() {
     setMetrics([]);
     setStrategyPnL([]);
     setHoldingsPnL([]);
-    setRollingIC([]);
-    setCorrelationMatrix(null);
-    setVifScores([]);
-    setGridSearchResults([]);
+    // Keep analytics from previous load (don't clear them for strategy-only changes)
+    // setRollingIC([]);
+    // setCorrelationMatrix(null);
+    // setVifScores([]);
+    // setGridSearchResults([]);
     try {
       const req = {
-        pool_id: computeConfig.poolId,
-        factor_ids: backtestMode === 'selected' && selectedFactors.length > 0
-          ? selectedFactors.map(f => parseInt(f.replace('factor_', ''), 10)).filter(n => !Number.isNaN(n))
-          : null,
         train_start: dateRange.startDate || '2022-01-01',
         train_end: '2023-12-31',
         test_start: '2024-01-01',
         test_end: dateRange.endDate || '2024-12-31',
-        target_horizons: computeConfig.targetHorizons,
         strategy: {
-          type: computeConfig.strategy.type as any,
+          type: computeConfig.strategy.type as string,
           top_pct: computeConfig.strategy.topPct,
           rebalance_days: computeConfig.strategy.rebalanceDays
         }
       };
 
-      const data = await import('@/lib/api-client').then(m => m.ApiClient.computeMetrics(req));
+      // Use lightweight strategy endpoint (much faster than full computeMetrics)
+      const data = await import('@/lib/api-client').then(m => m.ApiClient.computeStrategy(req));
       if (data.error) throw new Error(data.error);
-      if (data.pool_path) setLastPoolLoaded(data.pool_path);
-      else setLastPoolLoaded(computeConfig.poolId);
+      console.log(`[Strategy] Computed in ${data.computation_time_ms?.toFixed(0) || '?'}ms`);
 
       const newMetrics: StrategyMetric[] = data.metrics.map(m => ({
         Dataset: m.period === 'train' ? 'Validation' : 'Test',

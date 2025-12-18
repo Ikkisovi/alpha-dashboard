@@ -263,7 +263,7 @@ function hasMetricsAndReturns(data: unknown): data is { metrics: unknown[]; dail
 }
 
 async function ensureSignalFile(request: StrategyRequest): Promise<{ signalPath?: string; computeData?: unknown }> {
-    if (!request.pool_id) return undefined;
+    if (!request.pool_id) return {};
 
     const key = buildSignalKey(request);
     const signalPath = path.join(SIGNAL_CACHE_DIR, `${key}${SIGNAL_EXTENSION}`);

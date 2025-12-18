@@ -34,11 +34,10 @@ import {
   GridSearchResult,
 } from "@/utils/data";
 import { RollingIC } from "@/lib/types";
-import { FactorDetailPanel } from "@/components/FactorDetailPanel";
-import { ArrowUpRight, TrendingUp, Activity, BarChart3, Download, Search, SquareTerminal, AlertTriangle, Grid3X3, BookOpen, Info } from "lucide-react";
+import { TrendingUp, Activity, BarChart3, Search, SquareTerminal, AlertTriangle, Grid3X3, BookOpen, Info, LucideIcon, Download } from "lucide-react";
 
 // Bloomberg-style Card Wrapper
-function BBCard({ children, className, title, icon: Icon, span = "col-span-12" }: { children: React.ReactNode, className?: string, title?: string, icon?: any, span?: string }) {
+function BBCard({ children, className, title, icon: Icon, span = "col-span-12" }: { children: React.ReactNode, className?: string, title?: string, icon?: LucideIcon, span?: string }) {
   return (
     <div className={`${span} border border-gray-300 dark:border-gray-800 bg-white dark:bg-black p-0 flex flex-col ${className}`}>
       {title && (
@@ -137,7 +136,7 @@ export default function Dashboard() {
         test_end: dateRange.endDate || '2024-12-31',
         target_horizons: computeConfig.targetHorizons,
         strategy: {
-          type: computeConfig.strategy.type as any,
+          type: computeConfig.strategy.type as 'long_short' | 'long_only' | 'equal_weight',
           top_pct: computeConfig.strategy.topPct,
           rebalance_days: computeConfig.strategy.rebalanceDays
         }
@@ -147,16 +146,16 @@ export default function Dashboard() {
       if (data.error) throw new Error(data.error);
       setLastPoolLoaded(data.pool_path || computeConfig.poolId);
 
-      const dateMap = new Map<string, any>();
-      data.daily_returns.forEach((r: any) => {
+      const dateMap = new Map<string, Record<string, unknown>>();
+      data.daily_returns.forEach((r) => {
         if (r.factor_id === -1) return;
         if (!dateMap.has(r.date)) dateMap.set(r.date, { date: r.date, index: 0 });
-        const entry = dateMap.get(r.date);
+        const entry = dateMap.get(r.date)!;
         entry[`factor_${r.factor_id}`] = r.return;
       });
       const newFactorPnL = Array.from(dateMap.values())
-        .sort((a, b) => a.date.localeCompare(b.date))
-        .map((d, i) => ({ ...d, index: i }));
+        .sort((a, b) => String(a.date).localeCompare(String(b.date)))
+        .map((d, i) => ({ ...d, index: i })) as (FactorPnL & { index: number })[];
       setFactorPnL(newFactorPnL);
       setAllFactorPnL(newFactorPnL);
 
@@ -167,12 +166,13 @@ export default function Dashboard() {
 
       newFactorPnL.forEach((row, idx) => {
         const newRow: FactorPnL & { index: number } = { index: idx, date: row.date };
-        Object.keys(row).forEach(k => {
-          if (k !== 'index' && k !== 'date' && typeof row[k] === 'number') {
-            runningTotals[k] = (runningTotals[k] || 0.0) + (row[k] as number);
+        const rowRecord = row as Record<string, unknown>;
+        Object.keys(rowRecord).forEach(k => {
+          if (k !== 'index' && k !== 'date' && typeof rowRecord[k] === 'number') {
+            runningTotals[k] = (runningTotals[k] || 0.0) + (rowRecord[k] as number);
             newRow[k] = (runningTotals[k]) * 100;
-          } else if (typeof row[k] === 'string') {
-            newRow[k] = row[k];
+          } else if (typeof rowRecord[k] === 'string') {
+            newRow[k] = rowRecord[k] as string;
           }
         });
         cumulatives.push(newRow);
@@ -186,7 +186,7 @@ export default function Dashboard() {
         : [];
 
       if (data.factor_dictionary && data.factor_dictionary.length > 0) {
-        const mapped = data.factor_dictionary.map((d: any) => ({ ...d, expr: d.expression })) as FactorInfo[];
+        const mapped = data.factor_dictionary.map((d) => ({ ...d, expr: d.expression })) as FactorInfo[];
         const dedupedMap = new Map<number, FactorInfo>();
         mapped.forEach(f => { if (!dedupedMap.has(f.factor_id)) dedupedMap.set(f.factor_id, f); });
         const deduped = Array.from(dedupedMap.values());
@@ -217,9 +217,9 @@ export default function Dashboard() {
         }
       }
       setFactorDatasetReady(true);
-    } catch (e: any) {
+    } catch (e: unknown) {
       console.error(e);
-      setFactorLoadError(e.message);
+      setFactorLoadError(e instanceof Error ? e.message : 'Unknown error');
     } finally {
       setIsFactorLoading(false);
     }
@@ -237,22 +237,31 @@ export default function Dashboard() {
     // setVifScores([]);
     // setGridSearchResults([]);
     try {
+      const selectedFactorIds = backtestMode === 'selected'
+        ? selectedFactors
+          .map((f) => Number.parseInt(f.replace('factor_', ''), 10))
+          .filter((id) => Number.isFinite(id))
+        : [];
+
       const req = {
+        pool_id: computeConfig.poolId,
+        factor_ids: (backtestMode === 'selected' && selectedFactorIds.length > 0) ? selectedFactorIds : null,
         train_start: dateRange.startDate || '2022-01-01',
         train_end: '2023-12-31',
         test_start: '2024-01-01',
         test_end: dateRange.endDate || '2024-12-31',
+        target_horizons: computeConfig.targetHorizons,
         strategy: {
-          type: computeConfig.strategy.type as string,
+          type: computeConfig.strategy.type as 'long_short' | 'long_only' | 'equal_weight',
           top_pct: computeConfig.strategy.topPct,
           rebalance_days: computeConfig.strategy.rebalanceDays
         }
       };
 
-      // Use lightweight strategy endpoint (much faster than full computeMetrics)
+      // Compute strategy quickly using cached combined signals.
       const data = await import('@/lib/api-client').then(m => m.ApiClient.computeStrategy(req));
       if (data.error) throw new Error(data.error);
-      console.log(`[Strategy] Computed in ${data.computation_time_ms?.toFixed(0) || '?'}ms`);
+      console.log(`[Backtest] Computed in ${data.computation_time_ms?.toFixed(0) || '?'}ms`);
 
       const newMetrics: StrategyMetric[] = data.metrics.map(m => ({
         Dataset: m.period === 'train' ? 'Validation' : 'Test',
@@ -321,9 +330,9 @@ export default function Dashboard() {
         setMinDate(trimmedDates[0]);
         setMaxDate(trimmedDates[trimmedDates.length - 1]);
       }
-    } catch (e: any) {
+    } catch (e: unknown) {
       console.error(e);
-      setComputeError(e.message);
+      setComputeError(e instanceof Error ? e.message : 'Unknown error');
     } finally {
       setIsComputing(false);
     }
@@ -338,7 +347,7 @@ export default function Dashboard() {
       setMetrics(m);
       const fd = combined.dictionary;
       const factorReturns = (combined.returns && combined.returns.length > 0) ? combined.returns : fLegacy;
-      const enrichedDictionary = fd.map(factor => ({ ...factor, ...fMetrics.find((fm: any) => fm.factor_id === factor.factor_id) }));
+      const enrichedDictionary = fd.map(factor => ({ ...factor, ...fMetrics.find((fm) => (fm as { factor_id?: number }).factor_id === factor.factor_id) }));
       setFactorDictionary(enrichedDictionary);
       setCorrelationMatrix(corrMatrix);
       setVifScores(vif);
@@ -381,7 +390,7 @@ export default function Dashboard() {
         setMaxDate(validDates[validDates.length - 1]);
       }
       setLoading(false);
-      if ((factorReturns as any)?.length > 0) setFactorDatasetReady(true);
+      if (factorReturns.length > 0) setFactorDatasetReady(true);
     }
     fetchData();
   }, []);
@@ -601,10 +610,10 @@ export default function Dashboard() {
         {metrics.length > 0 && (
           <div className="col-span-12 border-y border-gray-800 bg-[#111] py-2 overflow-x-auto">
             <div className="flex gap-8 px-4 min-w-max">
-              <MetricValue label="NAV (Return)" value={(metrics.find(m => m.Dataset === "Test")?.ret! * 100).toFixed(2) + "%"} color="text-amber-500" />
+              <MetricValue label="NAV (Return)" value={((metrics.find(m => m.Dataset === "Test")?.ret ?? 0) * 100).toFixed(2) + "%"} color="text-amber-500" />
               <MetricValue label="Sharpe (Test)" value={(metrics.find(m => m.Dataset === "Test")?.ret_sharpe as number)?.toFixed(2) ?? "N/A"} color="text-gray-100" />
               <MetricValue label="IC (Test)" value={(metrics.find(m => m.Dataset === "Test")?.ic as number)?.toFixed(4) ?? "N/A"} color="text-gray-100" />
-              <MetricValue label="Max Drawdown" value={(metrics.find(m => m.Dataset === "Test")?.ret_mdd! * 100).toFixed(2) + "%"} color="text-red-500" />
+              <MetricValue label="Max Drawdown" value={((metrics.find(m => m.Dataset === "Test")?.ret_mdd ?? 0) * 100).toFixed(2) + "%"} color="text-red-500" />
               <MetricValue label="Val. Sharpe" value={(metrics.find(m => m.Dataset === "Validation")?.ret_sharpe as number)?.toFixed(2) ?? "N/A"} sub="In-Sample" color="text-gray-100" />
             </div>
           </div>
@@ -806,9 +815,10 @@ export default function Dashboard() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-800">
-                {[...factorDictionary].sort((a: any, b: any) => {
-                  const valA = a[sortConfig.key] ?? -999;
-                  const valB = b[sortConfig.key] ?? -999;
+                {[...factorDictionary].sort((a, b) => {
+                  const key = sortConfig.key as keyof FactorInfo;
+                  const valA = (a[key] ?? -999) as number;
+                  const valB = (b[key] ?? -999) as number;
                   if (valA < valB) return sortConfig.direction === 'asc' ? -1 : 1;
                   if (valA > valB) return sortConfig.direction === 'asc' ? 1 : -1;
                   return 0;

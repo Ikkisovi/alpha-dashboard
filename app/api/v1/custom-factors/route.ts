@@ -29,7 +29,7 @@ function makeDictKey(d: FactorInfo): string {
 function parseDictCsv(filePath: string, source: string): FactorInfo[] {
   if (!fs.existsSync(filePath)) return [];
   const text = fs.readFileSync(filePath, "utf-8");
-  const parsed = Papa.parse<Record<string, any>>(text, {
+  const parsed = Papa.parse<Record<string, unknown>>(text, {
     header: true,
     dynamicTyping: true,
     skipEmptyLines: true,
@@ -38,10 +38,10 @@ function parseDictCsv(filePath: string, source: string): FactorInfo[] {
     .filter(r => Object.keys(r).length > 0)
     .map(r => ({
       factor_id: Number(r.factor_id ?? r.id ?? r.index ?? 0),
-      name: r.name || `Factor ${r.factor_id ?? ""}`,
-      expr: r.expression || r.expr || "",
-      description: r.description || "",
-      type: r.type || "composite",
+      name: String(r.name || `Factor ${r.factor_id ?? ""}`),
+      expr: String(r.expression || r.expr || ""),
+      description: String(r.description || ""),
+      type: String(r.type || "composite"),
       ic: Number(r.ic ?? 0),
       icir: Number(r.icir ?? 0),
       sharpe: Number(r.sharpe ?? 0),
@@ -54,12 +54,12 @@ function parseDictJson(filePath: string, source: string): FactorInfo[] {
   try {
     const data = JSON.parse(fs.readFileSync(filePath, "utf-8"));
     if (!Array.isArray(data)) return [];
-    return data.map((r: any, idx: number) => ({
+    return data.map((r: Record<string, unknown>, idx: number) => ({
       factor_id: Number(r.factor_id ?? idx),
-      name: r.name || `Factor ${r.factor_id ?? idx}`,
-      expr: r.expression || r.expr || "",
-      description: r.description || "",
-      type: r.type || "composite",
+      name: String(r.name || `Factor ${r.factor_id ?? idx}`),
+      expr: String(r.expression || r.expr || ""),
+      description: String(r.description || ""),
+      type: String(r.type || "composite"),
       ic: Number(r.ic ?? 0),
       icir: Number(r.icir ?? 0),
       sharpe: Number(r.sharpe ?? 0),
@@ -74,19 +74,19 @@ function parseDictJson(filePath: string, source: string): FactorInfo[] {
 function parseReturnsCsv(filePath: string): FactorPnL[] {
   if (!fs.existsSync(filePath)) return [];
   const text = fs.readFileSync(filePath, "utf-8");
-  const parsed = Papa.parse<Record<string, any>>(text, {
+  const parsed = Papa.parse<Record<string, unknown>>(text, {
     header: true,
     dynamicTyping: true,
     skipEmptyLines: true,
   }).data;
-  return parsed.filter(r => Object.keys(r).length > 0) as any;
+  return parsed.filter(r => Object.keys(r).length > 0) as FactorPnL[];
 }
 
 export async function GET() {
   try {
     // Load dictionaries from all sources, tracking source file
     type FactorWithSource = FactorInfo & { _sourceFile: string };
-    let allFactors: FactorWithSource[] = [];
+    const allFactors: FactorWithSource[] = [];
 
     if (fs.existsSync(BASE_DICT_CSV)) {
       allFactors.push(...parseDictCsv(BASE_DICT_CSV, "dictionary.csv").map(f => ({ ...f, _sourceFile: "dictionary.csv" })));
@@ -151,7 +151,7 @@ export async function GET() {
         const returns = parseReturnsCsv(csvPath);
 
         returns.forEach((row) => {
-          const date = String((row as any).date || (row as any).Date || "");
+          const date = String((row as Record<string, unknown>).date || (row as Record<string, unknown>).Date || "");
           if (!date) return;
 
           const base = mergedReturnsMap.get(date) || { date };
@@ -159,7 +159,7 @@ export async function GET() {
           // Copy all columns directly (factor IDs are already correctly numbered in CSV)
           Object.keys(row).forEach(k => {
             if (k === "date" || k === "Date") return;
-            (base as any)[k] = (row as any)[k];
+            (base as Record<string, unknown>)[k] = (row as Record<string, unknown>)[k];
           });
 
           mergedReturnsMap.set(date, base);
@@ -191,7 +191,8 @@ export async function GET() {
         uniqueFactorsAfterDedup: dedupedDict.length,
       }
     });
-  } catch (e: any) {
-    return NextResponse.json({ error: e.message }, { status: 500 });
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : 'Unknown error';
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }

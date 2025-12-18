@@ -7,6 +7,7 @@ export interface ComputeRequest {
     test_start: string;
     test_end: string;
     target_horizons: number[];
+    skip_analytics?: boolean;
     strategy: {
         type: "long_short" | "long_only" | "equal_weight";
         top_pct: number;
@@ -51,6 +52,7 @@ export interface ComputeResponse {
     parse_warnings?: string[];
     pool_path?: string;
     error?: string;
+    details?: string;
     traceback?: string;
 }
 

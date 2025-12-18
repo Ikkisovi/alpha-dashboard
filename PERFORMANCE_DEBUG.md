@@ -19,9 +19,9 @@ Frontend (page.tsx)
     ↓
 fetchDynamicMetrics() calls ApiClient.computeStrategy()
     ↓
-/api/v1/strategy/route.ts spawns Python
+/api/v1/strategy/route.ts ensures combined factor signal (cached .npy on disk)
     ↓
-strategy_service.py reads binary close prices
+strategy_service.py reads binary close prices + cached signal
     ↓
 Returns daily portfolio returns
 ```
@@ -41,17 +41,24 @@ Returns daily portfolio returns
 - Spawns `strategy_service.py` instead of `compute_service.py`
 - 15s timeout
 
-### 3. Updated Frontend
-**File:** `app/page.tsx` (line 228-255)
-- Changed `fetchDynamicMetrics()` to call `ApiClient.computeStrategy()`
+### 3. Signal cache for factor selections
+**Files:** `app/api/v1/strategy/route.ts`, `python-backend/compute_service.py`, `python-backend/strategy_service.py`
+- When the frontend supplies `pool_id` + `factor_ids`, the API route hashes those parameters and saves/loads a combined equal-weight signal from `tmp/strategy_signals/*.npz`.
+- Each `.npz` now includes the combined signal, the 1-day target return tensor, and the exact factor-date index, so the lightweight service can backtest purely from cached tensors (no binary close-price reads).
+- Cache misses invoke `compute_service.py` once with `skip_analytics: true` and `combined_signal_output` so subsequent strategy tweaks stay fast. This heavy bootstrap now allows up to three minutes to finish because large pools can take longer than 60s on the first run.
 
-### 4. Updated API Client
+### 4. Updated Frontend
+**File:** `app/page.tsx` (line 228-270)
+- `fetchDynamicMetrics()` calls `ApiClient.computeStrategy()` and always sends the active pool + factor selections so the lightweight path honors single or multi-factor combos.
+
+### 5. Updated API Client
 **File:** `lib/api-client.ts`
-- Added `computeStrategy()` method
+- Extended `StrategyRequest` typing with `pool_id`, `factor_ids`, and cached signal path.
 
-### 5. Added skip_analytics to compute_service.py
+### 6. Added skip_analytics to compute_service.py
 **File:** `python-backend/compute_service.py` (line 266, 587)
 - Added `skip_analytics` parameter to skip VIF, grid search, rolling IC
+- VIF/correlation grids are only produced during the heavy compute path when explicitly requested; the lightweight strategy endpoint never recomputes them.
 
 ---
 
@@ -78,6 +85,20 @@ If `PROJECT_ROOT` resolves incorrectly, file loading fails.
 
 ### 4. Next.js Caching
 Next.js might be caching the old API response or route.
+
+### 5. Horizon Mismatch (Charts Empty)
+The dashboard filters `daily_returns` by `horizon_days === target_horizons[0]`. If the strategy backend hardcodes `horizon_days` (e.g. always `1`), the API can return data but the charts will be empty after filtering.
+
+Fix: include `target_horizons` in the `/api/v1/strategy` request and have `strategy_service.py` label `metrics[].horizon_days` and `daily_returns[].horizon_days` with that value. (Implemented.)
+
+### 6. Identical Charts Across Factors/Selections
+If `/api/v1/strategy` is called without `factor_signals`, `strategy_service.py` falls back to a constant signal and the backtest becomes independent of:
+- selected factors / factor combinations
+- pool selection
+
+Symptom: every backtest produces the same equity curve and the same performance ticker.
+
+Fix: the strategy API now materializes/caches a combined factor signal per `(pool, factor_ids, dates)` by calling `compute_service.py` once with `skip_analytics:true`. Subsequent lightweight strategy runs reuse that `.npy`, so single/multi-factor selections map 1:1 to the custom curve the UI expects.
 
 ---
 

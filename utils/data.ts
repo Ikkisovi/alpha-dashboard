@@ -85,7 +85,7 @@ export async function loadStrategyMetrics(): Promise<StrategyMetric[]> {
             dynamicTyping: true,
             skipEmptyLines: true,
             complete: (results) => {
-                const data = results.data.map((row: any) => {
+                const data = (results.data as Record<string, unknown>[]).map((row) => {
                     const dataset = row[""] || row["Dataset"] || row[Object.keys(row)[0]];
                     return { ...row, Dataset: dataset };
                 });
@@ -204,10 +204,10 @@ export async function loadFactorDictionary(): Promise<FactorInfo[]> {
             dynamicTyping: true,
             skipEmptyLines: true,
             complete: (results) => {
-                const data = results.data.map((row: any) => ({
+                const data = (results.data as Record<string, unknown>[]).map((row) => ({
                     ...row,
                     expr: row.expression,  // Map expression to expr
-                    type: inferFactorType(row.name, row.expression),  // Derive type
+                    type: inferFactorType(String(row.name || ''), String(row.expression || '')),  // Derive type
                 }));
                 resolve(data as FactorInfo[]);
             },
@@ -215,7 +215,7 @@ export async function loadFactorDictionary(): Promise<FactorInfo[]> {
     });
 }
 
-export async function loadFactorMetrics(): Promise<any[]> {
+export async function loadFactorMetrics(): Promise<Record<string, unknown>[]> {
     const response = await fetch("/data/factors/metrics.csv");
     const csvText = await response.text();
     return new Promise((resolve) => {
@@ -224,7 +224,7 @@ export async function loadFactorMetrics(): Promise<any[]> {
             dynamicTyping: true,
             skipEmptyLines: true,
             complete: (results) => {
-                resolve(results.data as any[]);
+                resolve(results.data as Record<string, unknown>[]);
             },
         });
     });
@@ -269,7 +269,7 @@ export async function loadVifScores(): Promise<VifScore[]> {
                 dynamicTyping: true,
                 skipEmptyLines: true,
                 complete: (results) => {
-                    const data = results.data.map((row: any) => ({
+                    const data = (results.data as Record<string, unknown>[]).map((row) => ({
                         factor_id: row.factor_id,
                         factor_name: row.factor_name,
                         vif: row.vif,

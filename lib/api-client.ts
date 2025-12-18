@@ -2,23 +2,50 @@
 import { ComputeRequest, ComputeResponse } from './types';
 
 export interface StrategyRequest {
+    pool_id?: string;
+    factor_ids?: number[] | null;
     train_start?: string;
     train_end?: string;
     test_start?: string;
     test_end?: string;
+    target_horizons?: number[];
+    targetHorizons?: number[];
     strategy?: {
-        type?: string;
+        type?: "long_short" | "long_only" | "equal_weight";
         top_pct?: number;
         rebalance_days?: number;
     };
     factor_signals?: number[][];
+    factor_signal_path?: string;
+}
+
+export interface StrategyMetricResult {
+    period: string;
+    factor_id: number;
+    ic: number;
+    ic_std: number;
+    icir: number;
+    ric: number;
+    annual_return: number;
+    sharpe: number;
+    max_drawdown: number;
+}
+
+export interface DailyReturnResult {
+    date: string;
+    factor_id: number;
+    horizon_days?: number;
+    return: number;
+    benchmark?: number;
+    rebalance_id?: number;
 }
 
 export interface StrategyResponse {
-    metrics: any[];
-    daily_returns: any[];
+    metrics: StrategyMetricResult[];
+    daily_returns: DailyReturnResult[];
     computation_time_ms: number;
     error?: string;
+    details?: string;
 }
 
 export class ApiClient {
@@ -35,7 +62,8 @@ export class ApiClient {
 
         if (!response.ok) {
             const error = await response.json().catch(() => ({ error: 'Unknown error' }));
-            throw new Error(error.error || `HTTP error ${response.status}`);
+            const message = error.details ? `${error.error}: ${error.details}` : error.error;
+            throw new Error(message || `HTTP error ${response.status}`);
         }
 
         return response.json();
@@ -56,7 +84,8 @@ export class ApiClient {
 
         if (!response.ok) {
             const error = await response.json().catch(() => ({ error: 'Unknown error' }));
-            throw new Error(error.error || `HTTP error ${response.status}`);
+            const message = error.details ? `${error.error}: ${error.details}` : error.error;
+            throw new Error(message || `HTTP error ${response.status}`);
         }
 
         return response.json();

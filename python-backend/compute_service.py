@@ -265,6 +265,7 @@ def compute_metrics(request):
 
         # Skip heavy analytics for strategy-only mode (faster)
         skip_analytics = request.get('skip_analytics', False)
+        combined_signal_output = request.get('combined_signal_output')
 
         parse_warnings: list[str] = []
 
@@ -443,6 +444,18 @@ def compute_metrics(request):
                  target_1d_expr = Ref(feature_close, -1) / feature_close - 1
                  targets[1] = exprs2tensor([target_1d_expr], data, normalize=False).squeeze(-1)
              target_1d_t = targets[1]
+
+             if combined_signal_output:
+                 try:
+                     os.makedirs(os.path.dirname(combined_signal_output), exist_ok=True)
+                     np.savez(
+                         combined_signal_output,
+                         signal=combined_signal.detach().cpu().numpy().astype(np.float32),
+                         target_returns=target_1d_t.detach().cpu().numpy().astype(np.float32),
+                         dates=np.array([d.strftime('%Y-%m-%d') for d in dates])
+                     )
+                 except Exception as e:
+                     raise RuntimeError(f"Failed to save combined signal to {combined_signal_output}: {e}") from e
 
              # Debug: Check target returns distribution
              valid_target = target_1d_t[~torch.isnan(target_1d_t)]
@@ -625,7 +638,7 @@ def compute_metrics(request):
                     vif_scores.append({
                         "factor_id": selected_factor_ids[i] if i < len(selected_factor_ids) else i,
                         "vif": float(vif),
-                        "multicollinear": vif > 10.0
+                        "multicollinear": bool(vif > 10.0)
                     })
             except ImportError:
                 print("statsmodels not installed, skipping VIF", file=sys.stderr)

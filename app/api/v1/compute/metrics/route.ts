@@ -2,8 +2,9 @@
 import { spawn } from 'child_process';
 import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
+import fs from 'fs';
 import { cacheManager } from '@/lib/cache-manager';
-import { ComputeRequest } from '@/lib/types';
+import { ComputeRequest, ComputeResponse } from '@/lib/types';
 
 export async function POST(request: NextRequest) {
     try {
@@ -48,21 +49,22 @@ export async function POST(request: NextRequest) {
             cache_hit: false
         });
 
-    } catch (e: any) {
-        return NextResponse.json({ error: e.message }, { status: 500 });
+    } catch (e: unknown) {
+        const message = e instanceof Error ? e.message : 'Unknown error';
+        return NextResponse.json({ error: message }, { status: 500 });
     }
 }
 
-async function runPythonComputation(request: ComputeRequest): Promise<any> {
-    return new Promise((resolve, reject) => {
+async function runPythonComputation(request: ComputeRequest): Promise<ComputeResponse> {
+    return new Promise((resolve) => {
         // Resolve python path: Use venv locally, python3 on Vercel
         // process.cwd() in Next.js dev is the dashboard directory
         const venvPython = path.resolve(process.cwd(), '../.venv/bin/python');
-        const pythonCmd = require('fs').existsSync(venvPython) ? venvPython : 'python3';
+        const pythonCmd = fs.existsSync(venvPython) ? venvPython : 'python3';
 
         // Path to script (relative to dashboard directory)
         let scriptPath = path.resolve(process.cwd(), '../python-backend/compute_service.py');
-        if (!require('fs').existsSync(scriptPath)) {
+        if (!fs.existsSync(scriptPath)) {
             // Fallback for Vercel deployment where python-backend is inside the project
             scriptPath = path.resolve(process.cwd(), 'python-backend/compute_service.py');
         }
@@ -96,7 +98,7 @@ async function runPythonComputation(request: ComputeRequest): Promise<any> {
             try {
                 const json = JSON.parse(stdout);
                 resolve(json);
-            } catch (e) {
+            } catch {
                 console.error("Failed to parse Python output:", stdout);
                 resolve({
                     error: "Invalid response from backend",
@@ -115,7 +117,7 @@ async function runPythonComputation(request: ComputeRequest): Promise<any> {
         // Timeout (60 seconds for initial load, subsequent requests are faster due to caching)
         setTimeout(() => {
             child.kill();
-            resolve({ error: "Computation timed out (60s limit)" });
+            resolve({ error: "Computation timed out (60s limit)", metrics: [], daily_returns: [], computation_time_ms: 0 });
         }, 60000);
     });
 }

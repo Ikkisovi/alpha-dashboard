@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "postinstall": "(pip3 install -r ../python-backend/requirements.txt || pip3 install -r python-backend/requirements.txt) || echo 'Pip install failed, continuing...'"
+    "postinstall": "node -e \"if(!process.env.VERCEL){require('child_process').execSync('(pip3 install -r ../python-backend/requirements.txt || pip3 install -r python-backend/requirements.txt) || true',{stdio:'inherit'})}\""
   },
   "dependencies": {
     "@radix-ui/react-select": "^2.2.6",

@@ -648,7 +648,7 @@ export default function Dashboard() {
 
         {/* --- Main Chart (Holding Period) --- */}
         <BBCard title="EQUITY CURVE & PERFORMANCE" icon={TrendingUp} span="col-span-12 lg:col-span-8" className="min-h-[400px]">
-          {holdingsPnL.length > 0 ? (
+          {holdingsPnL.length > 0 && holdingsPnL.some(d => typeof d.cumulative_ret === 'number' && Math.abs(d.cumulative_ret) > 0.001) ? (
             <div className="h-[350px] w-full">
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={holdingsPnL}>

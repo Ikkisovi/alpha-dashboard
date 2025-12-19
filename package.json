@@ -7,7 +7,10 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "postinstall": "node -e \"if(!process.env.VERCEL){require('child_process').execSync('(pip3 install -r ../python-backend/requirements.txt || pip3 install -r python-backend/requirements.txt) || true',{stdio:'inherit'})}\""
+    "postinstall": "node -e \"if(!process.env.VERCEL){require('child_process').execSync('(pip3 install -r ../python-backend/requirements.txt || pip3 install -r python-backend/requirements.txt) || true',{stdio:'inherit'})}\"",
+    "vercel:build": "VERCEL=1 NODE_ENV=production next build",
+    "vercel:start": "VERCEL=1 NODE_ENV=production next start",
+    "vercel:local": "npm run vercel:build && npm run vercel:start"
   },
   "dependencies": {
     "@radix-ui/react-select": "^2.2.6",

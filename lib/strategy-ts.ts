@@ -100,7 +100,7 @@ function loadFactorValuesMatrix(factorIds?: number[] | null): { dates: string[];
     const csvFiles = fs.readdirSync(FACTOR_VALUES_DIR).filter((f) => f.endsWith('.csv')).sort();
     if (csvFiles.length === 0) return null;
 
-    const merged = new Map<string, Record<string, number>>();
+    const merged = new Map<string, Record<string, number | string>>();
     const factorKeySet = new Set<string>();
 
     for (const file of csvFiles) {
@@ -118,7 +118,7 @@ function loadFactorValuesMatrix(factorIds?: number[] | null): { dates: string[];
             const rawDate = row.date ?? row.Date;
             if (!rawDate) continue;
             const date = String(rawDate);
-            const base = merged.get(date) || { date } as Record<string, number>;
+            const base: Record<string, number | string> = merged.get(date) ?? { date };
             Object.entries(row).forEach(([key, value]) => {
                 if (key === 'date' || key === 'Date' || !key.startsWith('factor_')) return;
                 const num = typeof value === 'number' ? value : Number(value);

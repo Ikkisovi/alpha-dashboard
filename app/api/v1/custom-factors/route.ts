@@ -88,6 +88,62 @@ function isPerStockCsv(filePath: string): boolean {
   return /(^|,)(ticker|instrument|symbol)(,|$)/i.test(firstLine);
 }
 
+function parsePerStockCsv(filePath: string): FactorPnL[] {
+  if (!fs.existsSync(filePath)) return [];
+  const text = fs.readFileSync(filePath, "utf-8");
+  const parsed = Papa.parse<Record<string, unknown>>(text, {
+    header: true,
+    dynamicTyping: true,
+    skipEmptyLines: true,
+  }).data;
+
+  const byDate = new Map<string, Record<string, number | string>>();
+
+  for (const row of parsed) {
+    const rawDate = row.date ?? row.Date;
+    if (!rawDate) continue;
+    const date = String(rawDate);
+    const entry = byDate.get(date) || ({ date } as Record<string, number | string>);
+    Object.entries(row).forEach(([key, value]) => {
+      if (!key.startsWith("factor_")) return;
+      const num = typeof value === "number" ? value : Number(value);
+      if (!Number.isFinite(num)) return;
+      const current = entry[key];
+      if (typeof current === "number") {
+        entry[key] = current + num;
+      } else {
+        entry[key] = num;
+      }
+    });
+    byDate.set(date, entry);
+  }
+
+  const results = Array.from(byDate.values())
+    .sort((a, b) => String(a.date).localeCompare(String(b.date))) as FactorPnL[];
+
+  if (results.length === 0) return [];
+
+  // Convert sums to means per date by counting rows per date
+  const counts = new Map<string, number>();
+  for (const row of parsed) {
+    const rawDate = row.date ?? row.Date;
+    if (!rawDate) continue;
+    const date = String(rawDate);
+    counts.set(date, (counts.get(date) || 0) + 1);
+  }
+
+  for (const row of results) {
+    const count = counts.get(String(row.date)) || 1;
+    Object.keys(row).forEach((key) => {
+      if (key.startsWith("factor_") && typeof row[key] === "number") {
+        row[key] = (row[key] as number) / count;
+      }
+    });
+  }
+
+  return results;
+}
+
 export async function GET() {
   try {
     // Load dictionaries from all sources, tracking source file
@@ -154,10 +210,9 @@ export async function GET() {
 
       for (const csvFile of csvFiles) {
         const csvPath = path.join(FACTOR_VALUES_DIR, csvFile);
-        if (isPerStockCsv(csvPath)) {
-          continue;
-        }
-        const returns = parseReturnsCsv(csvPath);
+        const returns = isPerStockCsv(csvPath)
+          ? parsePerStockCsv(csvPath)
+          : parseReturnsCsv(csvPath);
 
         returns.forEach((row) => {
           const date = String((row as Record<string, unknown>).date || (row as Record<string, unknown>).Date || "");

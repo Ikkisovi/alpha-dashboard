@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import zlib from 'zlib';
+import Papa from 'papaparse';
 
 export interface StrategyRequest {
     pool_id?: string;
@@ -33,9 +34,20 @@ type NpyArray = {
     data: Float32Array | Float64Array | Int32Array | Uint8Array | string[];
 };
 
+type FactorTensor = {
+    dates: string[];
+    tickers: string[];
+    factorKeys: string[];
+    rows: number;
+    cols: number;
+    factors: number;
+    data: Float32Array;
+};
+
 const BACKTRACK_DAYS = 100;
 const FUTURE_DAYS = 30;
 const QLIB_DATA_DIR = path.join(process.cwd(), 'data', '1555_qlib');
+const FACTOR_VALUES_DIR = path.join(process.cwd(), 'public', 'data', 'factor_values');
 
 function parseDate(dateStr: string): number {
     return new Date(`${dateStr}T00:00:00Z`).getTime();
@@ -69,6 +81,271 @@ function sliceMatrixRowsFromEnd(matrix: Matrix, length: number): Matrix {
     const data = new Float32Array(sliced.length);
     data.set(sliced);
     return { rows: length, cols: matrix.cols, data };
+}
+
+function parseFactorId(key: string): number | null {
+    if (!key.startsWith('factor_')) return null;
+    const id = Number(key.replace('factor_', ''));
+    return Number.isFinite(id) ? id : null;
+}
+
+function isPerStockCsv(filePath: string): boolean {
+    if (!fs.existsSync(filePath)) return false;
+    const firstLine = fs.readFileSync(filePath, 'utf-8').split(/\r?\n/)[0] || '';
+    return /(^|,)(ticker|instrument|symbol)(,|$)/i.test(firstLine);
+}
+
+function loadFactorValuesMatrix(factorIds?: number[] | null): { dates: string[]; matrix: Matrix; factorKeys: string[] } | null {
+    if (!fs.existsSync(FACTOR_VALUES_DIR)) return null;
+    const csvFiles = fs.readdirSync(FACTOR_VALUES_DIR).filter((f) => f.endsWith('.csv')).sort();
+    if (csvFiles.length === 0) return null;
+
+    const merged = new Map<string, Record<string, number>>();
+    const factorKeySet = new Set<string>();
+
+    for (const file of csvFiles) {
+        const csvPath = path.join(FACTOR_VALUES_DIR, file);
+        if (isPerStockCsv(csvPath)) {
+            continue;
+        }
+        const text = fs.readFileSync(csvPath, 'utf-8');
+        const parsed = Papa.parse<Record<string, unknown>>(text, {
+            header: true,
+            dynamicTyping: true,
+            skipEmptyLines: true,
+        }).data;
+        for (const row of parsed) {
+            const rawDate = row.date ?? row.Date;
+            if (!rawDate) continue;
+            const date = String(rawDate);
+            const base = merged.get(date) || { date } as Record<string, number>;
+            Object.entries(row).forEach(([key, value]) => {
+                if (key === 'date' || key === 'Date' || !key.startsWith('factor_')) return;
+                const num = typeof value === 'number' ? value : Number(value);
+                base[key] = Number.isFinite(num) ? num : Number.NaN;
+                factorKeySet.add(key);
+            });
+            merged.set(date, base);
+        }
+    }
+
+    const dates = Array.from(merged.keys()).sort((a, b) => a.localeCompare(b));
+    let factorKeys: string[] = [];
+    if (factorIds && factorIds.length > 0) {
+        factorKeys = factorIds.map((id) => `factor_${id}`);
+        const missing = factorKeys.filter((key) => !factorKeySet.has(key));
+        if (missing.length === factorKeys.length) {
+            throw new Error('No factor values found for requested factor IDs.');
+        }
+        if (missing.length > 0) {
+            console.warn(`[Strategy TS] Missing factor values for: ${missing.join(', ')}`);
+            factorKeys = factorKeys.filter((key) => factorKeySet.has(key));
+        }
+    } else {
+        factorKeys = Array.from(factorKeySet.values()).sort((a, b) => {
+            const aId = parseFactorId(a) ?? 0;
+            const bId = parseFactorId(b) ?? 0;
+            return aId - bId;
+        });
+    }
+
+    const rows = dates.length;
+    const cols = factorKeys.length;
+    if (rows === 0 || cols === 0) return null;
+    const matrix = createMatrix(rows, cols, Number.NaN);
+    for (let r = 0; r < rows; r += 1) {
+        const row = merged.get(dates[r]);
+        if (!row) continue;
+        for (let c = 0; c < cols; c += 1) {
+            const value = row[factorKeys[c]];
+            if (typeof value === 'number' && Number.isFinite(value)) {
+                matrix.data[r * cols + c] = value;
+            }
+        }
+    }
+
+    return { dates, matrix, factorKeys };
+}
+
+function loadPerStockFactorValues(factorIds?: number[] | null): FactorTensor | null {
+    if (!fs.existsSync(FACTOR_VALUES_DIR)) return null;
+    const csvFiles = fs.readdirSync(FACTOR_VALUES_DIR).filter((f) => f.endsWith('.csv')).sort();
+    if (csvFiles.length === 0) return null;
+
+    const rows: Array<{ date: string; ticker: string; values: Record<string, number> }> = [];
+    const dateSet = new Set<string>();
+    const tickerSet = new Set<string>();
+    const factorKeySet = new Set<string>();
+
+    for (const file of csvFiles) {
+        const csvPath = path.join(FACTOR_VALUES_DIR, file);
+        if (!isPerStockCsv(csvPath)) {
+            continue;
+        }
+        const text = fs.readFileSync(csvPath, 'utf-8');
+        const parsed = Papa.parse<Record<string, unknown>>(text, {
+            header: true,
+            dynamicTyping: true,
+            skipEmptyLines: true,
+        }).data;
+        for (const row of parsed) {
+            const rawDate = row.date ?? row.Date;
+            const rawTicker = row.ticker ?? row.Ticker ?? row.instrument ?? row.symbol ?? row.Symbol;
+            if (!rawDate || !rawTicker) continue;
+            const date = String(rawDate);
+            const ticker = String(rawTicker);
+            const values: Record<string, number> = {};
+            Object.entries(row).forEach(([key, value]) => {
+                if (!key.startsWith('factor_')) return;
+                const num = typeof value === 'number' ? value : Number(value);
+                if (Number.isFinite(num)) {
+                    values[key] = num;
+                } else {
+                    values[key] = Number.NaN;
+                }
+                factorKeySet.add(key);
+            });
+            if (Object.keys(values).length === 0) continue;
+            rows.push({ date, ticker, values });
+            dateSet.add(date);
+            tickerSet.add(ticker);
+        }
+    }
+
+    if (rows.length === 0) return null;
+    const dates = Array.from(dateSet.values()).sort((a, b) => a.localeCompare(b));
+    const tickers = Array.from(tickerSet.values()).sort((a, b) => a.localeCompare(b));
+
+    let factorKeys: string[] = [];
+    if (factorIds && factorIds.length > 0) {
+        factorKeys = factorIds.map((id) => `factor_${id}`);
+        const missing = factorKeys.filter((key) => !factorKeySet.has(key));
+        if (missing.length === factorKeys.length) {
+            throw new Error('No per-stock factor values found for requested factor IDs.');
+        }
+        if (missing.length > 0) {
+            console.warn(`[Strategy TS] Missing per-stock factor values for: ${missing.join(', ')}`);
+            factorKeys = factorKeys.filter((key) => factorKeySet.has(key));
+        }
+    } else {
+        factorKeys = Array.from(factorKeySet.values()).sort((a, b) => {
+            const aId = parseFactorId(a) ?? 0;
+            const bId = parseFactorId(b) ?? 0;
+            return aId - bId;
+        });
+    }
+
+    const rowsCount = dates.length;
+    const colsCount = tickers.length;
+    const factorsCount = factorKeys.length;
+    if (rowsCount === 0 || colsCount === 0 || factorsCount === 0) return null;
+
+    const data = new Float32Array(rowsCount * colsCount * factorsCount);
+    data.fill(Number.NaN);
+
+    const dateIndex = new Map(dates.map((d, i) => [d, i]));
+    const tickerIndex = new Map(tickers.map((t, i) => [t, i]));
+    const factorIndex = new Map(factorKeys.map((k, i) => [k, i]));
+
+    for (const row of rows) {
+        const tIdx = dateIndex.get(row.date);
+        const sIdx = tickerIndex.get(row.ticker);
+        if (tIdx === undefined || sIdx === undefined) continue;
+        for (const [key, value] of Object.entries(row.values)) {
+            const fIdx = factorIndex.get(key);
+            if (fIdx === undefined) continue;
+            data[(tIdx * colsCount + sIdx) * factorsCount + fIdx] = value;
+        }
+    }
+
+    return {
+        dates,
+        tickers,
+        factorKeys,
+        rows: rowsCount,
+        cols: colsCount,
+        factors: factorsCount,
+        data
+    };
+}
+
+function computeCombinedSignalFromFactorTensor(tensor: FactorTensor): Matrix {
+    const signals = createMatrix(tensor.rows, tensor.cols, 0);
+    const means = new Float32Array(tensor.factors);
+    const stds = new Float32Array(tensor.factors);
+    for (let t = 0; t < tensor.rows; t += 1) {
+        for (let f = 0; f < tensor.factors; f += 1) {
+            let sum = 0;
+            let sumSq = 0;
+            let count = 0;
+            for (let n = 0; n < tensor.cols; n += 1) {
+                const v = tensor.data[(t * tensor.cols + n) * tensor.factors + f];
+                if (!Number.isFinite(v)) continue;
+                sum += v;
+                sumSq += v * v;
+                count += 1;
+            }
+            if (count < 2) {
+                means[f] = 0;
+                stds[f] = 0;
+            } else {
+                const mean = sum / count;
+                const variance = Math.max(sumSq / count - mean * mean, 0);
+                means[f] = mean;
+                stds[f] = Math.sqrt(variance);
+            }
+        }
+
+        for (let n = 0; n < tensor.cols; n += 1) {
+            let sumZ = 0;
+            let countZ = 0;
+            for (let f = 0; f < tensor.factors; f += 1) {
+                const v = tensor.data[(t * tensor.cols + n) * tensor.factors + f];
+                if (!Number.isFinite(v)) continue;
+                const std = stds[f];
+                const mean = means[f];
+                const z = std > 1e-9 ? (v - mean) / (std + 1e-9) : 0;
+                sumZ += z;
+                countZ += 1;
+            }
+            signals.data[t * tensor.cols + n] = countZ > 0 ? sumZ / countZ : 0;
+        }
+    }
+    return signals;
+}
+
+function sliceMatrixByRowIndices(matrix: Matrix, rowIndices: number[]): Matrix {
+    const rows = rowIndices.length;
+    const cols = matrix.cols;
+    const data = new Float32Array(rows * cols);
+    for (let i = 0; i < rowIndices.length; i += 1) {
+        const srcOffset = rowIndices[i] * cols;
+        const destOffset = i * cols;
+        data.set(matrix.data.subarray(srcOffset, srcOffset + cols), destOffset);
+    }
+    return { rows, cols, data };
+}
+
+function alignByDates(
+    factorDates: string[],
+    signals: Matrix,
+    returnDates: string[],
+    returns: Matrix
+): { dates: string[]; signals: Matrix; returns: Matrix } {
+    const returnIndex = new Map(returnDates.map((d, i) => [d, i]));
+    const keepSignal: number[] = [];
+    const keepReturn: number[] = [];
+    for (let i = 0; i < factorDates.length; i += 1) {
+        const rIdx = returnIndex.get(factorDates[i]);
+        if (rIdx !== undefined) {
+            keepSignal.push(i);
+            keepReturn.push(rIdx);
+        }
+    }
+    const alignedSignals = sliceMatrixByRowIndices(signals, keepSignal);
+    const alignedReturns = sliceMatrixByRowIndices(returns, keepReturn);
+    const dates = keepSignal.map((i) => factorDates[i]);
+    return { dates, signals: alignedSignals, returns: alignedReturns };
 }
 
 function parseZipEntries(buffer: Buffer): Array<{ name: string; compression: number; compressedSize: number; localOffset: number }> {
@@ -259,7 +536,12 @@ function matrixFromNpy(array: NpyArray, label: string): Matrix {
     throw new Error(`Unsupported ${label} dtype ${array.dtype}`);
 }
 
-function loadClosePrices(qlibPath: string, startDate: string, endDate: string): { dates: string[]; close: Matrix } {
+function loadClosePrices(
+    qlibPath: string,
+    startDate: string,
+    endDate: string,
+    stockIds?: string[]
+): { dates: string[]; stockIds: string[]; close: Matrix } {
     const calendarPath = path.join(qlibPath, 'calendars', 'day.txt');
     const calendarText = fs.readFileSync(calendarPath, 'utf-8');
     const allDates = calendarText.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
@@ -284,21 +566,26 @@ function loadClosePrices(qlibPath: string, startDate: string, endDate: string): 
     endIdx = Math.min(allDates.length, endIdx + FUTURE_DAYS);
 
     const dates = allDates.slice(startIdx, endIdx);
-    const instrumentsPath = path.join(qlibPath, 'instruments', 'all.txt');
-    const instrumentsText = fs.readFileSync(instrumentsPath, 'utf-8');
-    const stockIds = instrumentsText
-        .split(/\r?\n/)
-        .map((line) => line.trim())
-        .filter(Boolean)
-        .map((line) => line.split('\t')[0].toLowerCase());
+    let resolvedStockIds: string[] = [];
+    if (stockIds && stockIds.length > 0) {
+        resolvedStockIds = stockIds.map((id) => id.toLowerCase());
+    } else {
+        const instrumentsPath = path.join(qlibPath, 'instruments', 'all.txt');
+        const instrumentsText = fs.readFileSync(instrumentsPath, 'utf-8');
+        resolvedStockIds = instrumentsText
+            .split(/\r?\n/)
+            .map((line) => line.trim())
+            .filter(Boolean)
+            .map((line) => line.split('\t')[0].toLowerCase());
+    }
 
     const nDays = dates.length;
-    const nStocks = stockIds.length;
+    const nStocks = resolvedStockIds.length;
     const close = createMatrix(nDays, nStocks, Number.NaN);
     const featuresDir = path.join(qlibPath, 'features');
 
     for (let sIdx = 0; sIdx < nStocks; sIdx += 1) {
-        const stockId = stockIds[sIdx];
+        const stockId = resolvedStockIds[sIdx];
         const closeFile = path.join(featuresDir, stockId, 'close.day.bin');
         if (!fs.existsSync(closeFile)) continue;
         const buffer = fs.readFileSync(closeFile);
@@ -317,7 +604,7 @@ function loadClosePrices(qlibPath: string, startDate: string, endDate: string): 
             }
         }
     }
-    return { dates, close };
+    return { dates, stockIds: resolvedStockIds, close };
 }
 
 function computeReturns(close: Matrix): Matrix {
@@ -635,6 +922,9 @@ export async function computeStrategyFallback(request: StrategyRequest): Promise
     let factorSignals: Matrix | null = null;
     let targetReturns: Matrix | null = null;
     let dates: string[] | null = null;
+    let returnDates: string[] | null = null;
+    let stockIds: string[] | null = null;
+    let clipReturns = true;
 
     if (request.factor_signal_path) {
         try {
@@ -653,18 +943,46 @@ export async function computeStrategyFallback(request: StrategyRequest): Promise
         factorSignals = matrixFromJson(request.factor_signals);
     }
     if (!factorSignals) {
-        throw new Error('Factor signals missing; ensure pool_id/factor selections are provided.');
+        const perStock = loadPerStockFactorValues(request.factor_ids ?? null);
+        if (perStock) {
+            factorSignals = computeCombinedSignalFromFactorTensor(perStock);
+            dates = perStock.dates;
+            stockIds = perStock.tickers;
+            console.log(`[Strategy TS] Loaded per-stock factor values: ${perStock.rows}x${perStock.cols}x${perStock.factors}`);
+        }
+    }
+    if (!factorSignals) {
+        const factorValues = loadFactorValuesMatrix(request.factor_ids ?? null);
+        if (factorValues) {
+            factorSignals = factorValues.matrix;
+            targetReturns = factorValues.matrix;
+            dates = factorValues.dates;
+            clipReturns = false;
+            console.log(`[Strategy TS] Loaded factor values: ${factorValues.dates.length}x${factorValues.factorKeys.length}`);
+        }
+    }
+    if (!factorSignals) {
+        throw new Error('Factor signals missing; provide factor_signals or factor_values CSVs in public/data/factor_values.');
     }
 
     if (!targetReturns || !dates || dates.length !== factorSignals.rows) {
-        const loaded = loadClosePrices(QLIB_DATA_DIR, trainStart, testEnd);
+        const loaded = loadClosePrices(QLIB_DATA_DIR, trainStart, testEnd, stockIds ?? undefined);
         targetReturns = computeReturns(loaded.close);
-        dates = loaded.dates;
+        returnDates = loaded.dates;
+        stockIds = loaded.stockIds;
+        if (dates && returnDates && dates.length !== returnDates.length) {
+            const aligned = alignByDates(dates, factorSignals, returnDates, targetReturns);
+            dates = aligned.dates;
+            factorSignals = aligned.signals;
+            targetReturns = aligned.returns;
+        } else if (!dates) {
+            dates = returnDates;
+        }
         if (targetReturns.rows !== factorSignals.rows) {
             const minLen = Math.min(targetReturns.rows, factorSignals.rows);
             targetReturns = sliceMatrixRowsFromEnd(targetReturns, minLen);
             factorSignals = sliceMatrixRowsFromEnd(factorSignals, minLen);
-            dates = dates.slice(dates.length - minLen);
+            dates = (dates || []).slice((dates || []).length - minLen);
         }
     }
 
@@ -682,7 +1000,9 @@ export async function computeStrategyFallback(request: StrategyRequest): Promise
 
     const dailyIc = computeDailyIc(factorSignals, targetReturns);
     const signalsClean = nanToZero(factorSignals);
-    const returnsClean = nanToZeroAndClip(targetReturns, -0.9, 0.5);
+    const returnsClean = clipReturns
+        ? nanToZeroAndClip(targetReturns, -0.9, 0.5)
+        : nanToZero(targetReturns);
 
     const { portfolio, benchmark, rebalanceIds } = computePortfolioReturns(
         signalsClean,

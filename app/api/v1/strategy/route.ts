@@ -363,7 +363,7 @@ export async function POST(request: NextRequest) {
 
         let signalPath: string | undefined;
 
-        if (payload.pool_id && !payload.factor_signal_path && !payload.factor_signals) {
+        if (!preferTs && payload.pool_id && !payload.factor_signal_path && !payload.factor_signals) {
             try {
                 const ensured = await ensureSignalFile(payload, { allowCompute: !preferTs });
                 if (ensured && 'computeData' in ensured && ensured.computeData) {

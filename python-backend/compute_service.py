@@ -49,6 +49,26 @@ sys.stdout = _original_stdout
 # Global cache for StockData to avoid reloading if the process stays alive (though unlikely in one-shot spawn)
 _data_cache = {}
 
+def export_factor_values_csv(path: Path,
+                             factor_tensor: torch.Tensor,
+                             dates,
+                             stock_ids,
+                             factor_ids: list[int]) -> None:
+    os.makedirs(path.parent, exist_ok=True)
+    values = factor_tensor.detach().cpu().numpy().astype(np.float32)  # (T, N, F)
+    t_count, n_count, f_count = values.shape
+    if len(dates) != t_count or len(stock_ids) != n_count:
+        raise RuntimeError(
+            f"Factor export shape mismatch: tensor {values.shape}, dates {len(dates)}, stocks {len(stock_ids)}"
+        )
+    if len(factor_ids) != f_count:
+        factor_ids = list(range(f_count))
+    date_strings = [d.strftime("%Y-%m-%d") for d in dates]
+    factor_cols = [f"factor_{fid}" for fid in factor_ids]
+    index = pd.MultiIndex.from_product([date_strings, list(stock_ids)], names=["date", "ticker"])
+    df = pd.DataFrame(values.reshape(t_count * n_count, f_count), index=index, columns=factor_cols)
+    df.to_csv(path)
+
 
 def get_stock_data(start_date: str, end_date: str, qlib_path: str) -> StockData:
     cache_key = f"{start_date}_{end_date}"
@@ -262,10 +282,13 @@ def compute_metrics(request):
         test_start = request.get('test_start', '2024-01-01')
         test_end = request.get('test_end', '2024-12-31')
         target_horizons = request.get('target_horizons', [20])
+        factor_id_offset = request.get('factor_id_offset')
+        offset_val = None
 
         # Skip heavy analytics for strategy-only mode (faster)
         skip_analytics = request.get('skip_analytics', False)
         combined_signal_output = request.get('combined_signal_output')
+        export_factor_values_csv_path = request.get('export_factor_values_csv')
 
         parse_warnings: list[str] = []
 
@@ -299,6 +322,15 @@ def compute_metrics(request):
         else:
             selected_exprs = all_exprs
             selected_factor_ids = list(range(len(selected_exprs)))
+
+        if factor_id_offset is not None:
+            try:
+                offset_val = int(factor_id_offset)
+            except (TypeError, ValueError):
+                offset_val = 0
+            output_factor_ids = [offset_val + fid for fid in selected_factor_ids]
+        else:
+            output_factor_ids = list(selected_factor_ids)
 
         if len(selected_exprs) == 0:
             return {
@@ -344,6 +376,20 @@ def compute_metrics(request):
 
         train_mask = (dates >= pd.Timestamp(train_start)) & (dates <= pd.Timestamp(train_end))
         test_mask = (dates >= pd.Timestamp(test_start)) & (dates <= pd.Timestamp(test_end))
+
+        exported_factor_values_csv = None
+        if export_factor_values_csv_path:
+            export_path = Path(export_factor_values_csv_path)
+            if not export_path.is_absolute():
+                export_path = PROJECT_ROOT / export_path
+            export_factor_values_csv(
+                export_path,
+                factor_tensor,
+                dates,
+                data._stock_ids,
+                output_factor_ids
+            )
+            exported_factor_values_csv = str(export_path)
         
         # Helper to compute for a specific period mask
         def calc_period_metrics(period_name, mask, f_tensor_slice, f_name, f_id, h_days, t_slice):
@@ -383,7 +429,7 @@ def compute_metrics(request):
 
         # Metrics for Individual Factors
         for i in range(len(selected_exprs)):
-            fid = selected_factor_ids[i] if i < len(selected_factor_ids) else i
+            fid = output_factor_ids[i] if i < len(output_factor_ids) else i
             for h in target_horizons:
                 targets_h = targets[h]
                 train_target_slice = targets_h[train_mask, :]
@@ -704,7 +750,7 @@ def compute_metrics(request):
 
             # 5. Factor Dictionary
             for i, (expr_str, _) in enumerate(selected_exprs):
-                fid = selected_factor_ids[i] if i < len(selected_factor_ids) else i
+                fid = output_factor_ids[i] if i < len(output_factor_ids) else i
                 test_metrics = [m for m in metrics_results if m['factor_id'] == fid and m['period'] == 'test' and m['horizon_days'] == primary_horizon]
                 tm = test_metrics[0] if test_metrics else {}
 
@@ -721,7 +767,7 @@ def compute_metrics(request):
                     "source": os.path.basename(pool_file)
                 })
 
-        return {
+        response = {
             "metrics": metrics_results,
             "daily_returns": daily_returns,
             "correlation_matrix": corr_matrix,
@@ -733,6 +779,11 @@ def compute_metrics(request):
             "pool_path": pool_file,
             "computation_time_ms": 0 # Placeholder, can measure wrap
         }
+        if offset_val is not None:
+            response["factor_id_offset"] = offset_val
+        if exported_factor_values_csv:
+            response["factor_values_csv"] = exported_factor_values_csv
+        return response
 
     except Exception as e:
         # Include full stack trace in error

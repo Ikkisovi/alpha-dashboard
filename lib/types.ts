@@ -8,6 +8,9 @@ export interface ComputeRequest {
     test_end: string;
     target_horizons: number[];
     skip_analytics?: boolean;
+    export_factor_values_csv?: string;
+    auto_increment_factor_ids?: boolean;
+    factor_id_offset?: number;
     strategy: {
         type: "long_short" | "long_only" | "equal_weight";
         top_pct: number;
@@ -51,6 +54,8 @@ export interface ComputeResponse {
     cache_hit?: boolean;
     parse_warnings?: string[];
     pool_path?: string;
+    factor_values_csv?: string;
+    factor_id_offset?: number;
     error?: string;
     details?: string;
     traceback?: string;

@@ -82,6 +82,12 @@ function parseReturnsCsv(filePath: string): FactorPnL[] {
   return parsed.filter(r => Object.keys(r).length > 0) as FactorPnL[];
 }
 
+function isPerStockCsv(filePath: string): boolean {
+  if (!fs.existsSync(filePath)) return false;
+  const firstLine = fs.readFileSync(filePath, "utf-8").split(/\r?\n/)[0] || "";
+  return /(^|,)(ticker|instrument|symbol)(,|$)/i.test(firstLine);
+}
+
 export async function GET() {
   try {
     // Load dictionaries from all sources, tracking source file
@@ -148,6 +154,9 @@ export async function GET() {
 
       for (const csvFile of csvFiles) {
         const csvPath = path.join(FACTOR_VALUES_DIR, csvFile);
+        if (isPerStockCsv(csvPath)) {
+          continue;
+        }
         const returns = parseReturnsCsv(csvPath);
 
         returns.forEach((row) => {

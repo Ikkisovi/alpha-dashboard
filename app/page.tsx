@@ -83,6 +83,7 @@ export default function Dashboard() {
   const [factorDatasetReady, setFactorDatasetReady] = useState(false);
   const [isFactorLoading, setIsFactorLoading] = useState(false);
   const [factorLoadError, setFactorLoadError] = useState<string | null>(null);
+  const [perStockFactorCsvUrl, setPerStockFactorCsvUrl] = useState<string | null>(null);
   const [minDate, setMinDate] = useState<string>("");
   const [maxDate, setMaxDate] = useState<string>("");
 
@@ -127,6 +128,9 @@ export default function Dashboard() {
     setFactorLoadError(null);
     setFactorDatasetReady(false);
     try {
+      const poolLabel = computeConfig.poolId.split('/').pop() || 'pool';
+      const safePoolLabel = poolLabel.replace(/[^a-z0-9]+/gi, '_').replace(/^_+|_+$/g, '') || 'pool';
+      const exportFile = `public/data/factor_values/stock_factor_values_${safePoolLabel}.csv`;
       const req = {
         pool_id: computeConfig.poolId,
         factor_ids: null,
@@ -135,6 +139,8 @@ export default function Dashboard() {
         test_start: '2024-01-01',
         test_end: dateRange.endDate || '2024-12-31',
         target_horizons: computeConfig.targetHorizons,
+        export_factor_values_csv: exportFile,
+        auto_increment_factor_ids: true,
         strategy: {
           type: computeConfig.strategy.type as 'long_short' | 'long_only' | 'equal_weight',
           top_pct: computeConfig.strategy.topPct,
@@ -145,6 +151,19 @@ export default function Dashboard() {
       const data = await import('@/lib/api-client').then(m => m.ApiClient.computeMetrics(req));
       if (data.error) throw new Error(data.error);
       setLastPoolLoaded(data.pool_path || computeConfig.poolId);
+      const rawCsvPath = data.factor_values_csv || exportFile;
+      if (rawCsvPath) {
+        const normalized = rawCsvPath.replace(/\\/g, "/");
+        const publicIndex = normalized.indexOf("/public/");
+        let url = normalized;
+        if (publicIndex >= 0) {
+          url = normalized.slice(publicIndex + "/public".length);
+        } else if (normalized.startsWith("public/")) {
+          url = normalized.slice("public".length);
+        }
+        if (!url.startsWith("/")) url = `/${url}`;
+        setPerStockFactorCsvUrl(url);
+      }
 
       const dateMap = new Map<string, Record<string, unknown>>();
       data.daily_returns.forEach((r) => {
@@ -446,6 +465,14 @@ export default function Dashboard() {
   };
 
   const exportRawFactorValues = () => {
+    if (perStockFactorCsvUrl) {
+      const link = document.createElement("a");
+      const fileName = perStockFactorCsvUrl.split("/").pop() || "stock_factor_values.csv";
+      link.href = `/api/v1/factor-values?file=${encodeURIComponent(fileName)}`;
+      link.download = fileName;
+      link.click();
+      return;
+    }
     if (factorPnL.length === 0) return;
     const headers = ["date", ...Object.keys(factorPnL[0] || {}).filter(k => k !== "date" && k !== "index")];
     const csvContent = [
@@ -872,7 +899,7 @@ export default function Dashboard() {
         <BBCard title="DATA UTILS" icon={Download} span="col-span-12 lg:col-span-4">
           <div className="space-y-3">
             <button onClick={exportRawFactorValues} className="w-full py-2 border border-gray-700 hover:bg-gray-900 text-gray-300 text-xs font-mono uppercase text-left px-3 flex justify-between">
-              <span>Raw Factor Values (.csv)</span> <Download className="h-3 w-3" />
+              <span>Per-Stock Factor Values (.csv)</span> <Download className="h-3 w-3" />
             </button>
             <button onClick={exportFactorDictionary} className="w-full py-2 border border-gray-700 hover:bg-gray-900 text-gray-300 text-xs font-mono uppercase text-left px-3 flex justify-between">
               <span>Factor Dictionary (.json)</span> <Download className="h-3 w-3" />

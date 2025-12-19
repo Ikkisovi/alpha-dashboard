@@ -648,28 +648,63 @@ export default function Dashboard() {
 
         {/* --- Main Chart (Holding Period) --- */}
         <BBCard title="EQUITY CURVE & PERFORMANCE" icon={TrendingUp} span="col-span-12 lg:col-span-8" className="min-h-[400px]">
-          {holdingsPnL.length > 0 && holdingsPnL.some(d => typeof d.cumulative_ret === 'number' && Math.abs(d.cumulative_ret) > 0.001) ? (
-            <div className="h-[350px] w-full">
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={holdingsPnL}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#333" />
-                  <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#666' }} interval="preserveStartEnd" minTickGap={30} />
-                  <YAxis tick={{ fontSize: 10, fill: '#666' }} tickFormatter={(val) => val.toFixed(0) + '%'} width={40} />
-                  <Tooltip
-                    contentStyle={{ backgroundColor: '#000', borderColor: '#333', color: '#fff', fontSize: '12px' }}
-                    itemStyle={{ color: '#fff' }}
-                    labelStyle={{ color: '#aaa', marginBottom: '5px' }}
-                    formatter={(value: number) => [`${value.toFixed(2)}%`]}
-                  />
-                  <Legend verticalAlign="top" height={36} iconType="rect" iconSize={10} wrapperStyle={{ fontSize: '10px', textTransform: 'uppercase' }} />
-                  <Line type="stepAfter" dataKey="cumulative_ret" name="Strategy Equity" stroke="#FF5500" strokeWidth={2} dot={false} activeDot={{ r: 4, fill: '#FF5500' }} />
-                  <Line type="monotone" dataKey="cumulative_benchmark" name="Benchmark" stroke="#666" strokeWidth={1} strokeDasharray="3 3" dot={false} />
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
-          ) : (
-            <div className="flex h-full items-center justify-center text-gray-500 text-xs font-mono uppercase">Waiting for Backtest Run...</div>
-          )}
+          {(() => {
+            const hasStrategyData = holdingsPnL.length > 0 && holdingsPnL.some(d => typeof d.cumulative_ret === 'number' && Math.abs(d.cumulative_ret) > 0.001);
+            const hasBenchmarkData = holdingsPnL.length > 0 && holdingsPnL.some(d => typeof d.cumulative_benchmark === 'number');
+
+            if (hasStrategyData) {
+              // Strategy backtested: Show strategy in orange, benchmark in grey
+              return (
+                <div className="h-[350px] w-full">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={holdingsPnL}>
+                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#333" />
+                      <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#666' }} interval="preserveStartEnd" minTickGap={30} />
+                      <YAxis tick={{ fontSize: 10, fill: '#666' }} tickFormatter={(val) => val.toFixed(0) + '%'} width={40} />
+                      <Tooltip
+                        contentStyle={{ backgroundColor: '#000', borderColor: '#333', color: '#fff', fontSize: '12px' }}
+                        itemStyle={{ color: '#fff' }}
+                        labelStyle={{ color: '#aaa', marginBottom: '5px' }}
+                        formatter={(value: number) => [`${value.toFixed(2)}%`]}
+                      />
+                      <Legend verticalAlign="top" height={36} iconType="rect" iconSize={10} wrapperStyle={{ fontSize: '10px', textTransform: 'uppercase' }} />
+                      <Line type="stepAfter" dataKey="cumulative_ret" name="Strategy Equity" stroke="#FF5500" strokeWidth={2} dot={false} activeDot={{ r: 4, fill: '#FF5500' }} />
+                      <Line type="monotone" dataKey="cumulative_benchmark" name="Benchmark" stroke="#666" strokeWidth={1} strokeDasharray="3 3" dot={false} />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              );
+            } else if (hasBenchmarkData) {
+              // No strategy yet: Show benchmark in orange with message overlay
+              return (
+                <div className="relative h-[350px] w-full">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={holdingsPnL}>
+                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#333" />
+                      <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#666' }} interval="preserveStartEnd" minTickGap={30} />
+                      <YAxis tick={{ fontSize: 10, fill: '#666' }} tickFormatter={(val) => val.toFixed(0) + '%'} width={40} />
+                      <Tooltip
+                        contentStyle={{ backgroundColor: '#000', borderColor: '#333', color: '#fff', fontSize: '12px' }}
+                        itemStyle={{ color: '#fff' }}
+                        labelStyle={{ color: '#aaa', marginBottom: '5px' }}
+                        formatter={(value: number) => [`${value.toFixed(2)}%`]}
+                      />
+                      <Legend verticalAlign="top" height={36} iconType="rect" iconSize={10} wrapperStyle={{ fontSize: '10px', textTransform: 'uppercase' }} />
+                      <Line type="monotone" dataKey="cumulative_benchmark" name="Benchmark (Preview)" stroke="#FF5500" strokeWidth={2} dot={false} />
+                    </LineChart>
+                  </ResponsiveContainer>
+                  <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                    <div className="bg-black/80 px-4 py-2 rounded border border-gray-700">
+                      <span className="text-gray-400 text-xs font-mono uppercase">Waiting for Backtest Run...</span>
+                    </div>
+                  </div>
+                </div>
+              );
+            } else {
+              // No data at all
+              return <div className="flex h-full items-center justify-center text-gray-500 text-xs font-mono uppercase">Waiting for Backtest Run...</div>;
+            }
+          })()}
         </BBCard>
 
         {/* --- Side Panel: Detailed Stats --- */}

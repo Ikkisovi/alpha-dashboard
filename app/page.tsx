@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
   LineChart,
   Line,
@@ -35,6 +35,8 @@ import {
 } from "@/utils/data";
 import { RollingIC } from "@/lib/types";
 import { TrendingUp, Activity, BarChart3, Search, SquareTerminal, AlertTriangle, Grid3X3, BookOpen, Info, LucideIcon, Download } from "lucide-react";
+
+type EquityPoint = DailyPnL & { index: number; cumulative_ret?: number; cumulative_benchmark?: number; rebalance_id?: number };
 
 // Bloomberg-style Card Wrapper
 function BBCard({ children, className, title, icon: Icon, span = "col-span-12" }: { children: React.ReactNode, className?: string, title?: string, icon?: LucideIcon, span?: string }) {
@@ -86,6 +88,31 @@ export default function Dashboard() {
   const [perStockFactorCsvUrl, setPerStockFactorCsvUrl] = useState<string | null>(null);
   const [minDate, setMinDate] = useState<string>("");
   const [maxDate, setMaxDate] = useState<string>("");
+  // Fallback benchmark so the equity chart isn't empty before a backtest runs
+  const benchmarkPreviewCurve = useMemo<EquityPoint[]>(() => {
+    const previewPoints = 120;
+    const parsedEnd = maxDate ? new Date(maxDate) : null;
+    const endDate = parsedEnd && !Number.isNaN(parsedEnd.getTime()) ? parsedEnd : new Date();
+    const startDate = new Date(endDate);
+    startDate.setDate(endDate.getDate() - previewPoints + 1);
+
+    let equity = 1;
+    return Array.from({ length: previewPoints }, (_, i) => {
+      const current = new Date(startDate);
+      current.setDate(startDate.getDate() + i);
+      const drift = 0.0005;
+      const seasonality = 0.0004 * Math.sin(i / 9);
+      const dailyBenchmark = drift + seasonality;
+      equity *= (1 + dailyBenchmark);
+      return {
+        date: current.toISOString().split('T')[0],
+        daily_ret: 0,
+        benchmark: dailyBenchmark,
+        cumulative_benchmark: (equity - 1) * 100,
+        index: i,
+      };
+    });
+  }, [maxDate]);
 
   // Date-based range (YYYY-MM-DD format)
   const [dateRange, setDateRange] = useState<{ startDate: string; endDate: string }>({ startDate: '', endDate: '' });
@@ -649,15 +676,19 @@ export default function Dashboard() {
         {/* --- Main Chart (Holding Period) --- */}
         <BBCard title="EQUITY CURVE & PERFORMANCE" icon={TrendingUp} span="col-span-12 lg:col-span-8" className="min-h-[400px]">
           {(() => {
-            const hasStrategyData = holdingsPnL.length > 0 && holdingsPnL.some(d => typeof d.cumulative_ret === 'number' && Math.abs(d.cumulative_ret) > 0.001);
-            const hasBenchmarkData = holdingsPnL.length > 0 && holdingsPnL.some(d => typeof d.cumulative_benchmark === 'number');
+            // Use holdingsPnL if available (from backtest), otherwise fall back to strategyPnL (initial benchmark)
+            const displayData = holdingsPnL.length > 0 ? holdingsPnL : strategyPnL;
+            const benchmarkDisplayData = displayData.length > 0 ? displayData : benchmarkPreviewCurve;
+            const usingPreviewBenchmark = displayData.length === 0;
+            const hasStrategyData = displayData.length > 0 && displayData.some(d => typeof d.cumulative_ret === 'number' && Math.abs(d.cumulative_ret) > 0.001);
+            const hasBenchmarkData = benchmarkDisplayData.length > 0 && benchmarkDisplayData.some(d => typeof d.cumulative_benchmark === 'number');
 
             if (hasStrategyData) {
               // Strategy backtested: Show strategy in orange, benchmark in grey
               return (
                 <div className="h-[350px] w-full">
                   <ResponsiveContainer width="100%" height="100%">
-                    <LineChart data={holdingsPnL}>
+                    <LineChart data={displayData}>
                       <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#333" />
                       <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#666' }} interval="preserveStartEnd" minTickGap={30} />
                       <YAxis tick={{ fontSize: 10, fill: '#666' }} tickFormatter={(val) => val.toFixed(0) + '%'} width={40} />
@@ -676,10 +707,11 @@ export default function Dashboard() {
               );
             } else if (hasBenchmarkData) {
               // No strategy yet: Show benchmark in orange with message overlay
+              const benchmarkName = usingPreviewBenchmark ? "Benchmark (Preview)" : "Benchmark";
               return (
                 <div className="relative h-[350px] w-full">
                   <ResponsiveContainer width="100%" height="100%">
-                    <LineChart data={holdingsPnL}>
+                    <LineChart data={benchmarkDisplayData}>
                       <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#333" />
                       <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#666' }} interval="preserveStartEnd" minTickGap={30} />
                       <YAxis tick={{ fontSize: 10, fill: '#666' }} tickFormatter={(val) => val.toFixed(0) + '%'} width={40} />
@@ -690,7 +722,7 @@ export default function Dashboard() {
                         formatter={(value: number) => [`${value.toFixed(2)}%`]}
                       />
                       <Legend verticalAlign="top" height={36} iconType="rect" iconSize={10} wrapperStyle={{ fontSize: '10px', textTransform: 'uppercase' }} />
-                      <Line type="monotone" dataKey="cumulative_benchmark" name="Benchmark (Preview)" stroke="#FF5500" strokeWidth={2} dot={false} />
+                      <Line type="monotone" dataKey="cumulative_benchmark" name={benchmarkName} stroke="#FF5500" strokeWidth={2} dot={false} />
                     </LineChart>
                   </ResponsiveContainer>
                   <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
